@@ -1,0 +1,119 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: agfabric
+      POSTGRES_PASSWORD: agfabric
+      POSTGRES_DB: agfabric
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agfabric"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports: ["6333:6333"]
+    volumes: ["qdrant:/qdrant/storage"]
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: agfabric
+      MINIO_ROOT_PASSWORD: agfabric-dev
+    ports: ["9000:9000", "9001:9001"]
+    volumes: ["minio:/data"]
+
+  api:
+    build: ./backend
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg://agfabric:agfabric@postgres:5432/agfabric
+    ports: ["8000:8000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes: ["./backend:/app"]
+
+  # Optional. Start with:
+  #   docker compose --profile celery up -d worker beat
+  # Setting CELERY_BROKER_URL also turns the API's in-process scheduler off, so
+  # agents are not run twice.
+  worker:
+    build: ./backend
+    profiles: ["celery"]
+    command: celery -A app.tasks worker --loglevel=info --concurrency=2
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg://agfabric:agfabric@postgres:5432/agfabric
+      CELERY_BROKER_URL: redis://redis:6379/0
+      S3_ENDPOINT_URL: http://minio:9000
+      QDRANT_URL: http://qdrant:6333
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes: ["./backend:/app"]
+
+  beat:
+    build: ./backend
+    profiles: ["celery"]
+    command: celery -A app.tasks beat --loglevel=info
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg://agfabric:agfabric@postgres:5432/agfabric
+      CELERY_BROKER_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_started
+    volumes: ["./backend:/app"]
+
+  # Optional. Start with:
+  #   docker compose --profile observability up -d prometheus grafana
+  # Grafana at http://localhost:3001 (admin/admin), dashboard pre-provisioned.
+  prometheus:
+    image: prom/prometheus:latest
+    profiles: ["observability"]
+    ports: ["9090:9090"]
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/rules.yml:/etc/prometheus/rules.yml:ro
+      - prometheus:/prometheus
+
+  grafana:
+    image: grafana/grafana:latest
+    profiles: ["observability"]
+    ports: ["3001:3000"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      # Local dashboards only; no calls out to grafana.com.
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ./observability/grafana-datasource.yml:/etc/grafana/provisioning/datasources/prometheus.yml:ro
+      - ./observability/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/provider.yml:ro
+      - ./observability/agfabric-dashboard.json:/etc/grafana/provisioning/dashboards/agfabric.json:ro
+      - grafana:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_started
+
+volumes:
+  pgdata:
+  prometheus:
+  grafana:
+  qdrant:
+  minio:

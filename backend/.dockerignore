@@ -1,0 +1,17 @@
+# The Dockerfile does `COPY . .`, so without this the local virtualenv (273MB of
+# Windows binaries, useless in a Linux container) ends up in the image.
+.venv/
+venv/
+env/
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Secrets must never be baked into an image layer.
+.env
+.env.*
+!.env.example

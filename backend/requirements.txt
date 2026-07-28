@@ -1,0 +1,21 @@
+fastapi>=0.115
+uvicorn[standard]>=0.32
+sqlalchemy>=2.0
+psycopg[binary]>=3.2
+pydantic-settings>=2.6
+pyjwt>=2.9
+python-multipart>=0.0.18
+# Kept deliberately light. minio (~1MB) over boto3 (~50MB with botocore) — same
+# S3 API, so it still targets real S3. pypdf/python-docx/openpyxl are all pure
+# Python. Nothing here pulls a native toolchain.
+minio>=7.2
+pypdf>=5.1
+python-docx>=1.1
+openpyxl>=3.1
+qdrant-client>=1.12
+openai>=1.57
+httpx>=0.27
+celery[redis]>=5.4
+alembic>=1.13
+prometheus-client>=0.21
+defusedxml>=0.7

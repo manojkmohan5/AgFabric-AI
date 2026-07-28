@@ -1,0 +1,62 @@
+# Alerting rules. These are the conditions worth waking someone for, as opposed
+# to the business alerts the risk agent raises — those are about grain, these are
+# about the system.
+groups:
+  - name: agfabric
+    rules:
+      - alert: ApiDown
+        expr: up{job="agfabric-api"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "AgFabric API is not responding to scrapes"
+
+      - alert: SqlGateBlockingQueries
+        expr: increase(agfabric_sql_gate_rejections_total[15m]) > 0
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "Generated SQL was blocked by the validation gate"
+          description: >-
+            The gate refused a model-generated query. Either the prompt is
+            drifting or someone is probing it. Check the reason label and the
+            audit log for the request.
+
+      - alert: EmbeddingBacklog
+        expr: agfabric_chunks_pending_embedding > 50
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "Document chunks are not being embedded"
+          description: >-
+            Uploads are landing but not becoming searchable. Check the embedding
+            agent and whether Qdrant is reachable.
+
+      - alert: AgentFailing
+        expr: increase(agfabric_agent_runs_total{status="failed"}[30m]) > 2
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Agent {{ $labels.agent }} keeps failing"
+
+      - alert: SlowQueries
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum(rate(agfabric_http_request_duration_seconds_bucket{path="/query"}[10m]))
+              by (le)
+          ) > 10
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "p95 latency on /query is above 10s"
+
+      - alert: LlmSpendSpike
+        expr: increase(agfabric_llm_cost_usd_total[1h]) > 1
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "LLM spend exceeded $1 in an hour"
+          description: >-
+            Cheap to ignore once, expensive to ignore for a week. Check
+            /audit/summary for which user or endpoint is responsible.

@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: backend
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: agfabric
+          POSTGRES_PASSWORD: agfabric
+          POSTGRES_DB: agfabric
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U agfabric"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      qdrant:
+        image: qdrant/qdrant:latest
+        ports: ["6333:6333"]
+
+    env:
+      # CI-only signing key. Real secrets go in repository secrets, never here.
+      JWT_SECRET: ci-only-secret-key-at-least-32-characters-long
+      DATABASE_URL: postgresql+psycopg://agfabric:agfabric@localhost:5432/agfabric
+      SEED_PASSWORD: ci-test-password
+      S3_ENDPOINT_URL: http://localhost:9000
+      S3_ACCESS_KEY: agfabric
+      S3_SECRET_KEY: agfabric-dev
+      S3_BUCKET: agfabric-ci
+      QDRANT_URL: http://localhost:6333
+      # No OPENAI_API_KEY on purpose. Pinned to the fake provider so CI costs
+      # nothing, works on forks, and gives deterministic ranking assertions.
+      EMBEDDING_PROVIDER: fake
+      LLM_PROVIDER: fake
+      # Agents are triggered explicitly by the tests; a background timer would
+      # race the assertions.
+      ENABLE_SCHEDULER: "false"
+      RUN_AGENTS_ON_STARTUP: "false"
+      # CI-only webhook signing key, so the signature checks can run.
+      WEBHOOK_SECRET: ci-only-webhook-secret
+      CORS_ORIGINS: http://localhost:3000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+
+      # Not a service container: minio/minio needs a `server /data` command, and
+      # GitHub Actions services cannot pass one. Same invocation used locally.
+      - name: Start MinIO
+        working-directory: .
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=agfabric \
+            -e MINIO_ROOT_PASSWORD=agfabric-dev \
+            minio/minio:latest server /data
+          for _ in $(seq 1 30); do
+            curl -sf http://localhost:9000/minio/health/live && exit 0
+            sleep 1
+          done
+          echo "MinIO did not become ready"; docker logs minio; exit 1
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Format check
+        run: ruff format --check .
+
+      - name: Unit checks (no database)
+        run: python selfcheck.py
+
+      - name: Migrations apply and are reversible
+        run: |
+          alembic upgrade head
+          alembic downgrade base
+          alembic upgrade head
+
+      # Fails if a model changed without a matching migration.
+      - name: Migrations match the models
+        run: alembic check
+
+      - name: Seed database
+        run: python -m app.seed
+
+      - name: Smoke test API
+        run: python smoketest.py
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Catches Dockerfile and compose rot without needing a registry.
+      - name: Validate compose file
+        working-directory: .
+        run: docker compose config --quiet
+
+      - name: Build API image
+        run: docker build -t agfabric-api .
