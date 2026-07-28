@@ -107,8 +107,13 @@ jobs:
       - name: Migrations match the models
         run: alembic check
 
+      # The seed drops every table, so it refuses to run without this explicit
+      # confirmation. Setting it here is safe and correct: the database is an
+      # ephemeral service container created for this job and discarded with it.
       - name: Seed database
         run: python -m app.seed
+        env:
+          ALLOW_DESTRUCTIVE_SEED: "true"
 
       - name: Smoke test API
         run: python smoketest.py
