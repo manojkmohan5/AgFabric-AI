@@ -1,0 +1,103 @@
+# Production-shaped stack for a persistent host (Openship's `composePath`),
+# kept separate from docker-compose.yml rather than editing it in place:
+# the dev file's bind-mounted source and published database ports exist for
+# hot-reload and local debugging, and neither belongs on a deployed host.
+#
+# Differences from docker-compose.yml, and why:
+#   - No bind mounts on api/frontend. A deployed container runs the image
+#     that was built, not a live view of the git checkout.
+#   - Postgres, Redis, Qdrant and MinIO publish no host ports. Only api and
+#     frontend need to be reachable; the rest talk to each other over the
+#     compose network by service name. A stray published 5432 or 9000 next to
+#     the seeded agfabric/agfabric-dev credentials is a real exposure on a
+#     public host, harmless on a laptop behind no open ports.
+#   - Every service restarts unless-stopped, since this stack is meant to
+#     survive a host reboot rather than being started by hand each session.
+#   - Secrets are ${VAR} references resolved from the environment Openship
+#     injects, never literals — this file is committed to git.
+#   - worker/beat/prometheus/grafana are left out of this file. They stay
+#     available in docker-compose.yml for anyone who wants them locally;
+#     add them back here deliberately if the deployment needs Celery or a
+#     dashboard, since they are not required for the app to serve requests.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-agfabric}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-agfabric}
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-agfabric}"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    volumes: ["qdrant:/qdrant/storage"]
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes: ["minio:/data"]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      retries: 10
+
+  api:
+    build: ./backend
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-agfabric}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-agfabric}
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      QDRANT_URL: http://qdrant:6333
+      # Must be the deployed frontend's public URL, or every browser request
+      # fails CORS. Set once the domain is known — see openship.json.
+      CORS_ORIGINS: ${CORS_ORIGINS}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Baked in at image build time — Next.js inlines NEXT_PUBLIC_* during
+        # `next build`, so this cannot be supplied as a runtime env var later.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  qdrant:
+  minio:

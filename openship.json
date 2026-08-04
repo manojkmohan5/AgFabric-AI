@@ -1,0 +1,26 @@
+{
+  "$schema": "https://openship.io/openship.schema.json",
+  "composePath": "docker-compose.openship.yml",
+  "env": {
+    "JWT_SECRET": { "value": "", "secret": true },
+    "OPENAI_API_KEY": { "value": "", "secret": true },
+    "WEBHOOK_SECRET": { "value": "", "secret": true },
+    "POSTGRES_PASSWORD": { "value": "", "secret": true },
+    "MINIO_ROOT_USER": { "value": "", "secret": true },
+    "MINIO_ROOT_PASSWORD": { "value": "", "secret": true },
+    "SEED_PASSWORD": { "value": "", "secret": true },
+    "BOOTSTRAP_ADMIN_EMAIL": "",
+    "BOOTSTRAP_ADMIN_PASSWORD": { "value": "", "secret": true },
+    "ALLOW_DESTRUCTIVE_SEED": "false",
+    "DEMO_MODE": "false",
+    "EMBEDDING_PROVIDER": "auto",
+    "LLM_PROVIDER": "auto",
+    "OCR_PROVIDER": "auto",
+    "OPENAI_CHAT_MODEL": "gpt-4.1-nano",
+    "OPENAI_VISION_MODEL": "gpt-4.1-nano",
+    "ENABLE_SPEND_CAP": "true",
+    "DAILY_SPEND_CAP_USD": "10.0",
+    "CORS_ORIGINS": "",
+    "NEXT_PUBLIC_API_URL": ""
+  }
+}
