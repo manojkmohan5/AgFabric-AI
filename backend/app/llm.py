@@ -164,7 +164,7 @@ class OpenAIChat:
     def __init__(self, api_key: str, model: str, max_output_tokens: int) -> None:
         from openai import OpenAI
 
-        self._client = OpenAI(api_key=api_key)
+        self._client = OpenAI(api_key=api_key, base_url=settings.openai_base_url or None)
         self.model = model
         self._max_output_tokens = max_output_tokens
 
@@ -177,6 +177,7 @@ class OpenAIChat:
             # SQL is short; a low ceiling also caps the damage of a runaway reply.
             max_completion_tokens=400,
             temperature=0.0,
+            extra_body=settings.openai_extra_body or None,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": question},
@@ -193,6 +194,7 @@ class OpenAIChat:
         response = self._client.chat.completions.create(
             model=self.model,
             max_completion_tokens=self._max_output_tokens,
+            extra_body=settings.openai_extra_body or None,
             # Deterministic-leaning: this is a retrieval-grounded lookup, not
             # creative writing.
             temperature=0.0,

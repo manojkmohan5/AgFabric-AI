@@ -15,4 +15,6 @@ COPY . .
 # signals a shell that does not forward it, uvicorn never sees the shutdown,
 # and every stop or redeploy waits out the full timeout and gets killed
 # instead of shutting down cleanly.
-CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+#
+# PORT comes from the host when it assigns one (Railway does); 8000 otherwise.
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

@@ -1,3 +1,6 @@
+from typing import Any
+
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -7,6 +10,18 @@ class Settings(BaseSettings):
     jwt_secret: str
     jwt_ttl_minutes: int = 60
     database_url: str = "postgresql+psycopg://agfabric:agfabric@localhost:5432/agfabric"
+
+    @field_validator("database_url")
+    @classmethod
+    def _psycopg3_driver(cls, url: str) -> str:
+        # Railway and most managed Postgres hand out postgres:// or postgresql://,
+        # which SQLAlchemy maps to psycopg2. Only psycopg 3 is installed, so pin
+        # the driver here rather than in every deployment's variables.
+        for scheme in ("postgres://", "postgresql://"):
+            if url.startswith(scheme):
+                return "postgresql+psycopg://" + url.removeprefix(scheme)
+        return url
+
     # Dev/demo seed users only — never a real credential.
     seed_password: str = "agfabric-dev"  # noqa: S105
 
@@ -63,6 +78,13 @@ class Settings(BaseSettings):
     # EMBEDDING_PROVIDER=openai|fake.
     embedding_provider: str = "auto"
     openai_api_key: str = ""
+    # Any OpenAI-compatible endpoint, e.g. https://provider.example/v1. Blank uses
+    # OpenAI itself. Chat, embeddings and OCR all go through it.
+    openai_base_url: str = ""
+    # JSON merged into every chat and OCR request, for provider-specific knobs.
+    # Reasoning models spend the output budget thinking unless told not to, e.g.
+    # {"chat_template_kwargs": {"enable_thinking": false}} for Qwen on Lumen.
+    openai_extra_body: dict[str, Any] = {}
     openai_embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
     max_query_chars: int = 1000

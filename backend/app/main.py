@@ -200,11 +200,16 @@ def health(db: DbDep, response: Response) -> dict:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
         return {"status": "unhealthy", "checks": checks}
 
-    try:
-        storage.client().bucket_exists(settings.s3_bucket)
-        checks["object_storage"] = "ok"
-    except Exception as exc:
-        checks["object_storage"] = f"error: {_brief(exc)}"
+    if not settings.s3_bucket:
+        # Switched off for this deployment. Probing the default endpoint would
+        # spend the client's retry budget, seconds, on every health check.
+        checks["object_storage"] = "disabled"
+    else:
+        try:
+            storage.client().bucket_exists(settings.s3_bucket)
+            checks["object_storage"] = "ok"
+        except Exception as exc:
+            checks["object_storage"] = f"error: {_brief(exc)}"
 
     try:
         vectors.client().get_collections()

@@ -29,6 +29,7 @@ from app import extract, llm, resolve, risk, sqlgen  # noqa: E402
 from app import graph as kg  # noqa: E402
 from app.auth import hash_password, make_token, read_token, verify_password  # noqa: E402
 from app.chunk import chunk_text  # noqa: E402
+from app.config import Settings  # noqa: E402
 from app.embed import FakeEmbedder  # noqa: E402
 from app.ratelimit import SlidingWindow  # noqa: E402
 
@@ -100,6 +101,14 @@ def check_tokens() -> None:
         raise AssertionError("expired token was accepted")
     except jwt.ExpiredSignatureError:
         pass
+
+
+def check_database_url() -> None:
+    """Hosted postgres:// URLs get the psycopg 3 driver that is installed."""
+    pinned = "postgresql+psycopg://u:p@db:5432/agfabric"
+    for raw in ("postgres://u:p@db:5432/agfabric", "postgresql://u:p@db:5432/agfabric"):
+        assert Settings(database_url=raw).database_url == pinned, raw
+    assert Settings(database_url=pinned).database_url == pinned
 
 
 def check_duplicate_invoices() -> None:
@@ -1319,6 +1328,7 @@ if __name__ == "__main__":
     for check in (
         check_passwords,
         check_tokens,
+        check_database_url,
         check_rate_limiter,
         check_chunking,
         check_fake_embedder,

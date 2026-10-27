@@ -91,7 +91,7 @@ class OpenAIVisionOCR:
     def __init__(self, api_key: str, model: str) -> None:
         from openai import OpenAI
 
-        self._client = OpenAI(api_key=api_key)
+        self._client = OpenAI(api_key=api_key, base_url=settings.openai_base_url or None)
         self.model = model
 
     def read(self, data: bytes, mime: str) -> str:
@@ -100,6 +100,7 @@ class OpenAIVisionOCR:
             response = self._client.chat.completions.create(
                 model=self.model,
                 max_completion_tokens=settings.ocr_max_output_tokens,
+                extra_body=settings.openai_extra_body or None,
                 temperature=0.0,
                 messages=[
                     {

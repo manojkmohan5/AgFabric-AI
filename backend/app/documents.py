@@ -56,6 +56,11 @@ def upload(
     user: UserDep,
     file: Annotated[UploadFile, File()],
 ) -> dict:
+    if not settings.s3_bucket:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "document storage is not configured on this deployment",
+        )
     filename = (file.filename or "").strip()
     if not filename:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "filename is required")
