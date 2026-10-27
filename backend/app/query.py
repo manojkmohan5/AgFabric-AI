@@ -126,8 +126,12 @@ def hybrid_query(body: QueryRequest, request: Request, db: DbDep, user: UserDep)
 
     # 4. Text-to-SQL: the model composes a query for anything the fixed lookups
     # cannot express — aggregates, comparisons, rankings.
+    # Nothing is written before the model calls, so hand this request's pooled
+    # connection back now rather than holding it through two slow LLM round
+    # trips. The audit row below simply takes a fresh one.
+    db.commit()
     chat = llm.get_chat()
-    generated, sql_tokens = _text_to_sql(chat, body.question)
+    generated, sql_tokens = _text_to_sql(chat, body.question, show_money)
 
     # 5. Answer, grounded in exactly what was retrieved above.
     context = _build_context(records, relationships, chunks, generated)
@@ -135,9 +139,11 @@ def hybrid_query(body: QueryRequest, request: Request, db: DbDep, user: UserDep)
         answer = chat.answer(body.question, context)
     except Exception as exc:
         # An upstream LLM failure is not a client error and must not look like
-        # a confident empty answer.
+        # a confident empty answer. The provider's own message stays in the log:
+        # it can carry request details the caller has no use for.
+        logger.exception("answer generation failed")
         raise HTTPException(
-            status.HTTP_502_BAD_GATEWAY, f"answer generation failed: {exc}"
+            status.HTTP_502_BAD_GATEWAY, "answer generation failed; try again shortly"
         ) from exc
 
     took_ms = round((time.perf_counter() - started) * 1000, 1)
@@ -191,12 +197,18 @@ def hybrid_query(body: QueryRequest, request: Request, db: DbDep, user: UserDep)
     return payload
 
 
-def _text_to_sql(chat: llm.Chat, question: str) -> tuple[dict[str, Any], tuple[int, int]]:
+def _text_to_sql(
+    chat: llm.Chat, question: str, finance: bool
+) -> tuple[dict[str, Any], tuple[int, int]]:
     """Generate, gate, and run a query. Returns (report, (in_tokens, out_tokens)).
 
     Every outcome is reported rather than raised: a rejected or failed query
     still leaves the structured, graph and document context intact, and the
     reason lands in the audit envelope.
+
+    `finance` picks what the model is shown and which database role runs the
+    query, so a non-finance caller cannot reach invoices or contract prices
+    through generated SQL any more than through the fixed endpoints.
     """
     report: dict[str, Any] = {
         "attempted": settings.enable_text_to_sql,
@@ -212,17 +224,20 @@ def _text_to_sql(chat: llm.Chat, question: str) -> tuple[dict[str, Any], tuple[i
     if not settings.enable_text_to_sql:
         return report, (0, 0)
 
+    prompt = sqlgen.SQL_SYSTEM_PROMPT if finance else sqlgen.OPS_SQL_SYSTEM_PROMPT
+    tables = sqlgen.ALLOWED_TABLES if finance else sqlgen.OPS_TABLES
     try:
-        generated = chat.generate_sql(question, sqlgen.SQL_SYSTEM_PROMPT)
-    except Exception as exc:
-        report["error"] = f"generation failed: {exc}"
+        generated = chat.generate_sql(question, prompt)
+    except Exception:
+        logger.exception("SQL generation failed")
+        report["error"] = "generation failed"
         return report, (0, 0)
 
     tokens = (generated.input_tokens, generated.output_tokens)
     report["raw"] = generated.text
 
     try:
-        safe_sql = sqlgen.validate(generated.text)
+        safe_sql = sqlgen.validate(generated.text, tables)
     except sqlgen.UnsafeSQL as exc:
         report["rejected"] = str(exc)
         # A model declining an unanswerable question is normal operation. A query
@@ -235,7 +250,7 @@ def _text_to_sql(chat: llm.Chat, question: str) -> tuple[dict[str, Any], tuple[i
         return report, tokens
 
     report["sql"] = safe_sql
-    result = sqlgen.run(safe_sql)
+    result = sqlgen.run(safe_sql, finance=finance)
     report.update(
         {
             "error": result.error,
@@ -362,10 +377,12 @@ def _vector_hits(
         vectors.ensure_collection(embedder.dimensions)
         vector = embedder.embed([question])[0]
         hits = vectors.search(vector, limit)
-    except Exception as exc:
-        # Structured and graph context are still useful without document search;
-        # the reason is reported rather than swallowed.
-        return [], str(exc)
+    except Exception:
+        # Structured and graph context are still useful without document search.
+        # The cause goes to the log; the caller gets a fixed message, since raw
+        # client errors can name internal hosts and ports.
+        logger.warning("vector retrieval failed", exc_info=True)
+        return [], "document search is unavailable"
 
     if not hits:
         return [], None

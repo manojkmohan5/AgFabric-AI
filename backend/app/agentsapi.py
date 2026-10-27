@@ -22,8 +22,9 @@ DbDep = Annotated[Session, Depends(get_db)]
 UserDep = Annotated[User, Depends(current_user)]
 
 SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2}
-# Duplicate invoices expose commercial amounts, so the same rule as /dashboard.
-FINANCE_ONLY_KINDS = ("duplicate_invoice",)
+# These findings carry commercial figures in their title and evidence: invoice
+# amounts, contract prices and unrealised P&L. Same rule as /dashboard and /market.
+FINANCE_ONLY_KINDS = ("duplicate_invoice", "contract_offmarket", "unhedged_position")
 
 
 @router.get("/agents")

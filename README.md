@@ -136,16 +136,23 @@ traceability, what was resolved, plus provider, model, tokens, cost and latency.
 
 ### Guarding generated SQL
 
-Generated SQL is untrusted input that happens to be executable, so three
-independent layers sit between generation and results:
+Generated SQL is untrusted input that happens to be executable, so independent
+layers sit between generation and results:
 
 1. **A static gate** ([sqlgen.py](backend/app/sqlgen.py) `validate()`) — one
    statement only, `SELECT`/`WITH` only, no comments, no DML/DDL, no dangerous
-   functions, every table on an allowlist, `users` unreachable by any route
-   including `UNION` and subqueries, and a `LIMIT` imposed if absent.
-2. **A Postgres `READ ONLY` transaction** — the layer that does not depend on
-   those regexes being complete. A write is refused by the database itself.
-3. **`statement_timeout`** — a pathological query cannot hold a connection.
+   functions, every table on the caller's allowlist, `users` never named. A fast
+   first filter with clear errors, but regexes over SQL can be talked around.
+2. **A Postgres role per caller class** — the boundary. The query runs under
+   `SET LOCAL ROLE`, as a role that can `SELECT` the allowlisted tables and
+   nothing else; non-finance callers' role also lacks `invoices` and
+   `contracts.price_per_bu`, so generated SQL obeys the same redaction as every
+   endpoint. Comma joins, quoted identifiers and functions that query tables
+   themselves all hit the database's permission check. The roles come from the
+   `sql_reader_roles` migration.
+3. **A Postgres `READ ONLY` transaction** — a write is refused by the database.
+4. **`statement_timeout` and a row cap inside Postgres** — the query is wrapped
+   in `SELECT * FROM (...) LIMIT 201`, so a huge result never reaches the API.
 
 Nothing is silently discarded: a rejected query reports its reason in
 `explanation.generated_sql.rejected`, and the structured, graph and document
@@ -267,8 +274,11 @@ Eight agents, each on a cadence matched to how often its source changes:
 | `entity_resolution` | 30 min | Deliveries with no contract |
 | `fx` | 6 h | USD rates for export currencies |
 
-All eight run once at startup, in the background, so the app serves requests
-immediately while its panels populate.
+All eight run once at startup and again whenever someone signs in, in the
+background, so the app serves requests immediately while its panels populate.
+Startup and sign-in sweeps share a five-minute cooldown, so a burst of logins
+cannot become a burst of calls to the free data sources. Dashboard cards that are
+still empty poll every 15 seconds until the sweep fills them.
 
 The default scheduler is an in-process asyncio loop, so no broker is needed.
 Setting `CELERY_BROKER_URL` switches to Celery **and disables the in-process
@@ -291,6 +301,7 @@ backfill skips chunks already indexed.
 | Source | Provides |
 | --- | --- |
 | Open-Meteo | Per-facility daily forecasts (no key) |
+| MET Norway | Forecast fallback when Open-Meteo refuses; its free tier limits by IP, which shared cloud IPs exhaust |
 | Yahoo Finance | CBOT corn, soybean, wheat futures (`ZC=F` `ZS=F` `ZW=F`) |
 | open.er-api.com | USD rates for six export currencies |
 | Google News RSS | Agricultural trade headlines |
@@ -317,8 +328,11 @@ curl -X POST localhost:8000/webhooks/deliveries \
   -H 'Content-Type: application/json' -d "$BODY"
 ```
 
-The signature is verified over the raw body, and the event id is unique, so a
-replay returns the original outcome rather than creating a second delivery. With
+The signature is verified over the raw body, and events are deduplicated on a
+hash of that signed body, so a replay returns the original outcome rather than
+creating a second delivery. The `X-AgFabric-Event-Id` header is outside the
+signature, so it plays no part in deduplication. The body is read as a capped
+stream, never buffered whole before the size check. With
 `WEBHOOK_SECRET` unset the endpoint refuses everything rather than accepting
 unsigned writes.
 
@@ -442,14 +456,29 @@ Secrets (`JWT_SECRET`, `SEED_PASSWORD` for the demo accounts, `METRICS_TOKEN`,
 published ranges, so the login limiter sees each caller's real address; refresh
 it if Cloudflare's list changes.
 
-Document storage and vector search are off for now (`S3_BUCKET` blank, no
-Qdrant), so uploads answer 503 and `/health` reports `degraded`. Set the `S3_*`
-variables to an S3-compatible bucket and `QDRANT_URL` to a Qdrant cluster to turn
-them on.
+Document storage and vector search are off for now (`S3_BUCKET` and
+`QDRANT_URL` blank), so uploads and search answer 503 and `/health` reports both
+as `disabled`. Set the `S3_*` variables to an S3-compatible bucket and
+`QDRANT_URL` to a Qdrant cluster to turn them on.
+
+`DEMO_MODE` is on: the sign-in page offers one-click demo logins and `/health`
+publishes `SEED_PASSWORD`, so anyone with the link can act as any demo user,
+including `exec`, who can add records and users. Before any real data goes in,
+set `DEMO_MODE=false`, rotate `SEED_PASSWORD` and deactivate the demo users and
+any users created through them.
 
 Both services are on free plans: the API sleeps after 15 minutes idle, so the
 first request after that takes about a minute, and Render deletes the free
 database 30 days after creation unless it is upgraded.
+
+The API image installs `backend/requirements.lock`, every package pinned with
+its hashes, and CI audits that file with `pip-audit`. After changing
+`requirements.txt`, regenerate it:
+
+```bash
+uv pip compile backend/requirements.txt --generate-hashes --python-version 3.12 \
+  --python-platform linux -o backend/requirements.lock
+```
 
 ### CI/CD
 

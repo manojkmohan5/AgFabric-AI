@@ -70,7 +70,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: backend/requirements*.txt
+          cache-dependency-path: backend/requirements*
 
       # Not a service container: MinIO needs a `server /data` command, and
       # GitHub Actions services cannot pass one. Same invocation used locally.
@@ -89,8 +89,15 @@ jobs:
           done
           echo "MinIO did not become ready"; docker logs minio; exit 1
 
+      # Exactly the hash-checked set the Docker image ships, so the checks below
+      # test what deploys, plus the linter.
       - name: Install dependencies
-        run: pip install -r requirements-dev.txt
+        run: |
+          pip install --require-hashes -r requirements.lock
+          pip install "ruff>=0.8"
+
+      - name: Audit dependencies for known vulnerabilities
+        run: pipx run pip-audit -r requirements.lock --disable-pip
 
       - name: Lint
         run: ruff check .
@@ -152,6 +159,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Audit dependencies for known vulnerabilities
+        run: npm audit --omit=dev --audit-level=high
+
       # next build type-checks as well, so this catches type errors too.
       - name: Build
         run: npm run build
@@ -207,8 +217,9 @@ jobs:
     defaults:
       run:
         working-directory: frontend
+    # The token is set only on the steps that need it, not job-wide, so the
+    # Vercel CLI's own install scripts never see it.
     env:
-      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
       VERCEL_ORG_ID: team_0bT4yh3FxNCE0PkEUhMee7hL
       VERCEL_PROJECT_ID: prj_HSpb3icgTpWl7lJiIY0lnzHu12Lh
     steps:
@@ -229,12 +240,18 @@ jobs:
         run: npm install --global vercel@65.4.0
 
       - name: Pull production settings
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: |
           test -n "$VERCEL_TOKEN" || { echo "::error::Add the VERCEL_TOKEN repository secret"; exit 1; }
           vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
 
       - name: Build
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: vercel build --prod --token="$VERCEL_TOKEN"
 
       - name: Deploy to Vercel
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN"

@@ -1,16 +1,21 @@
 """Text-to-SQL: the model writes the query, this module decides whether it runs.
 
 Generated SQL is untrusted input that happens to be executable, so there are
-three independent layers between generation and results. Any one of them alone
-would be a single point of failure:
+independent layers between generation and results. Any one of them alone would
+be a single point of failure:
 
 1. `validate()` — a static gate. One statement, must be SELECT/WITH, no comments,
-   no DML/DDL, no dangerous functions, every table on the allowlist, `users`
-   never reachable, and a LIMIT forced on.
-2. A Postgres READ ONLY transaction. Even if the gate is bypassed, the database
-   itself refuses to write — this is the layer that does not depend on my regexes
-   being complete.
-3. `statement_timeout`, so a pathological query cannot hold a connection open.
+   no DML/DDL, no dangerous functions, every table on the caller's allowlist,
+   `users` never reachable. A fast first filter with clear errors, but regexes
+   over SQL can be talked around (comma joins, quoted identifiers, functions
+   that query tables themselves), so it is not the boundary.
+2. A Postgres role per caller class (`run()` switches into it). It can SELECT
+   the allowlisted tables — and, for non-finance callers, no money columns — and
+   nothing else. This is the boundary: the database decides what is readable,
+   however the SQL is written.
+3. A READ ONLY transaction, so nothing can be written either.
+4. `statement_timeout` and a row cap applied inside Postgres, so a pathological
+   query can neither hold a connection nor flood the API's memory.
 
 Everything except `run()` is a pure function over strings, so the gate is tested
 exhaustively without a database.
@@ -24,6 +29,11 @@ from sqlalchemy import text
 
 from .config import settings
 from .db import engine
+
+# Created by the sql_reader_roles migration, which grants exactly the tables and
+# columns below. Generated SQL only ever runs as one of these.
+FINANCE_ROLE = "agfabric_sql_finance"
+OPS_ROLE = "agfabric_sql_ops"
 
 # `users` is deliberately absent: it holds password hashes and has no business
 # in an analytics answer. Anything not listed here cannot be queried at all.
@@ -59,32 +69,41 @@ documents(id, filename, content_type, size_bytes, sha256, version, text_chars,
           chunk_count, status, uploaded_at)
 document_chunks(id, document_id->documents, ordinal, text, char_count, embedded)"""
 
-SQL_SYSTEM_PROMPT = f"""You write a single read-only PostgreSQL query answering the
+# Non-finance callers see what their role can read: no invoices table and no
+# contract price, the same figures the API redacts for them everywhere else.
+OPS_TABLES = ALLOWED_TABLES - {"invoices"}
+OPS_SCHEMA = re.sub(r"\ninvoices\([^)]*\)", "", SCHEMA).replace(" price_per_bu,", "")
+
+
+def _system_prompt(schema: str, money_rule: str) -> str:
+    return f"""You write a single read-only PostgreSQL query answering the
 user's question about a grain operations database.
 
-SCHEMA (these are the only tables that exist for you):
-{SCHEMA}
+SCHEMA (these are the only tables and columns that exist for you):
+{schema}
 
 Rules — a query breaking any of these is rejected and the user gets no answer:
 - Exactly one statement. No semicolons inside it, no second statement.
 - SELECT or WITH only. Never INSERT, UPDATE, DELETE, DROP, ALTER, CREATE, GRANT,
   TRUNCATE, COPY or SET.
 - No SQL comments (-- or /* */).
-- Only the tables listed above. There is no users table; never reference one.
-- Include a LIMIT (200 or fewer) unless the query is a single aggregate row.
-- Money columns are numeric: invoices.amount, contracts.price_per_bu.
-- Bushels are net_bu on deliveries, quantity_bu on contracts.
+- Only the tables and columns listed above. There is no users table; never
+  reference one. Name the columns you need rather than using SELECT *.
+- At most 200 rows are returned.
+{money_rule}- Bushels are net_bu on deliveries, quantity_bu on contracts.
 
 Return ONLY the SQL. No prose, no markdown fences, no explanation.
 If the question cannot be answered from this schema, return exactly: NO_QUERY"""
 
+
+SQL_SYSTEM_PROMPT = _system_prompt(
+    SCHEMA, "- Money columns are numeric: invoices.amount, contracts.price_per_bu.\n"
+)
+OPS_SQL_SYSTEM_PROMPT = _system_prompt(OPS_SCHEMA, "")
+
 _FENCE = re.compile(r"^\s*```(?:sql)?\s*|\s*```\s*$", re.IGNORECASE)
 _STARTS_READONLY = re.compile(r"^\s*(select|with)\b", re.IGNORECASE)
-_LIMIT = re.compile(r"\blimit\s+\d+", re.IGNORECASE)
 _TABLE_REF = re.compile(r"\b(?:from|join)\s+([a-zA-Z_][a-zA-Z0-9_.\"]*)", re.IGNORECASE)
-_AGGREGATE_ONLY = re.compile(
-    r"^\s*select\s+(?:count|sum|avg|min|max)\s*\(", re.IGNORECASE
-)
 
 # Anything that writes, changes session state, touches the filesystem, or sleeps.
 _FORBIDDEN = re.compile(
@@ -125,8 +144,8 @@ def clean(raw: str) -> str:
     return candidate
 
 
-def validate(raw: str) -> str:
-    """Return executable SQL, or raise UnsafeSQL. Never returns something unsafe."""
+def validate(raw: str, tables: frozenset[str] = ALLOWED_TABLES) -> str:
+    """Return executable SQL, or raise UnsafeSQL. `tables` is the caller's allowlist."""
     sql = clean(raw)
     if not sql:
         raise UnsafeSQL("empty query")
@@ -161,20 +180,16 @@ def validate(raw: str) -> str:
         name.lower()
         for name in re.findall(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s+as\s*\(", sql, re.I)
     }
-    unknown = referenced - ALLOWED_TABLES - cte_names
+    unknown = referenced - tables - cte_names
     if unknown:
         raise UnsafeSQL(f"table(s) not allowed: {', '.join(sorted(unknown))}")
     if not referenced:
         raise UnsafeSQL("query references no known table")
-
-    # A single-row aggregate needs no LIMIT; everything else gets one imposed.
-    if not _LIMIT.search(sql) and not _AGGREGATE_ONLY.match(sql):
-        sql = f"{sql} LIMIT {settings.sql_max_rows}"
     return sql
 
 
-def run(sql: str) -> SqlResult:
-    """Execute validated SQL read-only, with a timeout. Assumes `validate` passed."""
+def run(sql: str, *, finance: bool) -> SqlResult:
+    """Execute validated SQL as the caller's reader role. Assumes `validate` passed."""
     try:
         # postgresql_readonly issues a READ ONLY transaction, so a write is
         # refused by the database even if the gate above missed something.
@@ -182,10 +197,18 @@ def run(sql: str) -> SqlResult:
             conn.execute(
                 text(f"SET LOCAL statement_timeout = {settings.sql_statement_timeout_ms}")
             )
-            result = conn.execute(text(sql))
+            # From here Postgres decides what is readable: the role sees the
+            # allowlisted tables (no money columns for non-finance callers) and
+            # nothing else, whatever the SQL says. Reverts with the transaction.
+            conn.execute(text(f"SET LOCAL ROLE {FINANCE_ROLE if finance else OPS_ROLE}"))
+            # The cap is applied by Postgres. fetchmany alone would only trim a
+            # result psycopg had already buffered in full. One row past the cap
+            # makes truncation detectable rather than silent.
+            result = conn.execute(
+                text(f"SELECT * FROM ({sql}) AS q LIMIT {settings.sql_max_rows + 1}")
+            )
             columns = list(result.keys())
-            # Fetch one past the cap so truncation is detectable rather than silent.
-            fetched = result.fetchmany(settings.sql_max_rows + 1)
+            fetched = result.fetchall()
     except Exception as exc:
         return SqlResult(sql=sql, error=_short(exc))
 

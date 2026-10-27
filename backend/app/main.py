@@ -7,12 +7,23 @@ from hmac import compare_digest
 from typing import Annotated
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
+from fastapi import (
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Request,
+    Response,
+    status,
+)
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from prometheus_client import CONTENT_TYPE_LATEST
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from . import feeds, market, metrics, scheduler, storage, vectors
 from . import graph as kg
@@ -20,7 +31,7 @@ from .admin import bootstrap_first_admin
 from .admin import router as admin_router
 from .agentsapi import router as agents_router
 from .audit import router as audit_router
-from .auth import current_user, make_token, verify_password
+from .auth import current_user, hash_password, make_token, verify_password
 from .config import cors_origin_list, settings
 from .db import SessionLocal, get_db
 from .documents import router as documents_router
@@ -44,20 +55,38 @@ from .ratelimit import login_limiter
 from .search import router as search_router
 from .webhooks import router as webhooks_router
 
+# Without a root handler every app logger below WARNING is dropped, so user
+# provisioning and password changes would never reach the platform's logs.
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-async def _startup_agents() -> None:
+
+# Startup and every sign-in refresh all the feeds, so whoever opens the app sees
+# current data. At most once per window, though: a sweep calls four free
+# third-party APIs, and a burst of logins must not become a burst of those.
+SWEEP_COOLDOWN_SECONDS = 300.0
+_last_sweep = float("-inf")
+
+
+async def _sweep_agents(trigger: str) -> None:
     """Run every scheduled agent once, in the background, logging any failure.
 
     Its own coroutine so the exception never escapes into an unretrieved task
     warning, and so a slow third party delays only the panels that need it.
+    Check-and-set happens with no await between, so on the single event loop two
+    callers cannot both start a sweep.
     """
+    global _last_sweep
+    now = asyncio.get_running_loop().time()
+    if now - _last_sweep < SWEEP_COOLDOWN_SECONDS:
+        return
+    _last_sweep = now
     try:
-        await scheduler.tick("startup")
+        await scheduler.tick(trigger)
     except asyncio.CancelledError:
         # Shut down before the sweep finished. Not an error.
         raise
     except Exception:
-        logger.exception("startup agent run failed; continuing")
+        logger.exception("%s agent sweep failed; continuing", trigger)
 
 
 @asynccontextmanager
@@ -91,7 +120,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # — so awaiting would leave the API dead for ~15s on every restart, and
         # dead indefinitely if one upstream hangs. Backgrounded, the API is up at
         # once and the panels fill in as each agent lands.
-        startup_agents = asyncio.create_task(_startup_agents())
+        startup_agents = asyncio.create_task(_sweep_agents("startup"))
     # Celery beat owns scheduling when a broker is configured. Running both would
     # execute every agent twice per interval.
     if settings.enable_scheduler and not settings.celery_broker_url:
@@ -113,20 +142,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="AgFabric AI", version="0.1.0", lifespan=lifespan)
 
-# Explicit origins, methods and headers rather than wildcards.
-#
-# allow_credentials is False on purpose: auth is a Bearer token in a header, not a
-# cookie, so the browser never needs to send credentials cross-origin. Turning it
-# on would only widen what a malicious page could do.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=cors_origin_list(),
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-AgFabric-Signature"],
-    max_age=600,
-)
-
 app.include_router(documents_router)
 app.include_router(search_router)
 app.include_router(query_router)
@@ -136,10 +151,54 @@ app.include_router(audit_router)
 app.include_router(admin_router)
 app.include_router(provision_router)
 
-app.add_middleware(metrics.MetricsMiddleware)
-
 DbDep = Annotated[Session, Depends(get_db)]
 UserDep = Annotated[User, Depends(current_user)]
+
+# Middleware wraps in reverse order of registration. From the outside in:
+# CORS -> metrics -> request id -> body cap -> routes. CORS is outermost so a 413
+# or 500 still carries the headers a browser needs to read it, and the request-id
+# layer turns an unhandled exception into an ordinary 500 inside the other two,
+# so it is counted and readable instead of escaping as a bare error.
+
+
+class BodySizeLimit:
+    """Refuse request bodies over `limit` bytes before anything buffers them.
+
+    FastAPI reads and parses a body before auth dependencies run, so without this
+    an anonymous client can make the API hold whatever it sends in memory.
+    """
+
+    def __init__(self, app: ASGIApp, limit: int) -> None:
+        self.app = app
+        self.limit = limit
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        declared = dict(scope["headers"]).get(b"content-length", b"")
+        if declared.isdigit() and int(declared) > self.limit:
+            too_large = JSONResponse({"detail": "request body too large"}, 413)
+            await too_large(scope, receive, send)
+            return
+        seen = 0
+
+        async def counted() -> Message:
+            nonlocal seen
+            message = await receive()
+            seen += len(message.get("body", b""))
+            # A chunked body declares no length, so it is measured as it arrives.
+            if seen > self.limit:
+                raise HTTPException(
+                    status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "request body too large"
+                )
+            return message
+
+        await self.app(scope, counted, send)
+
+
+# Uploads are the largest legitimate body; the extra MiB covers multipart framing.
+app.add_middleware(BodySizeLimit, limit=settings.max_upload_bytes + 1024 * 1024)
 
 
 @app.middleware("http")
@@ -158,9 +217,34 @@ async def correlate(request: Request, call_next):  # noqa: ANN001, ANN201
         else str(uuid4())
     )
     request.state.request_id = request_id
-    response = await call_next(request)
+    try:
+        response = await call_next(request)
+    except Exception:
+        # Answered here, not by Starlette's outermost error handler, so the 500
+        # still passes back through metrics and CORS and carries this id.
+        logger.exception(
+            "unhandled error [%s] %s %s", request_id, request.method, request.url.path
+        )
+        response = JSONResponse({"detail": "internal server error"}, 500)
     response.headers["X-Request-Id"] = request_id
     return response
+
+
+app.add_middleware(metrics.MetricsMiddleware)
+
+# Explicit origins, methods and headers rather than wildcards.
+#
+# allow_credentials is False on purpose: auth is a Bearer token in a header, not a
+# cookie, so the browser never needs to send credentials cross-origin. Turning it
+# on would only widen what a malicious page could do.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origin_list(),
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-AgFabric-Signature"],
+    max_age=600,
+)
 
 
 @app.get("/metrics", include_in_schema=False)
@@ -168,14 +252,17 @@ def prometheus_metrics(db: DbDep, authorization: str | None = Header(None)) -> R
     if settings.metrics_token:
         supplied = (authorization or "").removeprefix("Bearer ").strip()
         # Constant-time: this is a shared secret, so a timing oracle is a real if
-        # minor leak.
-        if not compare_digest(supplied, settings.metrics_token):
+        # minor leak. Bytes, because compare_digest raises on non-ASCII str.
+        if not compare_digest(supplied.encode(), settings.metrics_token.encode()):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid metrics token")
     metrics.refresh_gauges(db)
     return Response(content=metrics.render(), media_type=CONTENT_TYPE_LATEST)
 
 
 logger = logging.getLogger(__name__)
+
+# Hashed once at import; verifying against it costs what a real check costs.
+_TIMING_DUMMY_HASH = hash_password("timing-equaliser-not-a-real-password")
 
 
 @app.get("/health")
@@ -192,11 +279,14 @@ def health(db: DbDep, response: Response) -> dict:
     """
     checks: dict[str, str] = {}
 
+    # This endpoint is anonymous, so failures report a fixed word and the driver's
+    # message (hosts, ports, sometimes credentials) goes only to the log.
     try:
         db.execute(text("SELECT 1"))
         checks["database"] = "ok"
-    except Exception as exc:
-        checks["database"] = f"error: {_brief(exc)}"
+    except Exception:
+        logger.warning("health: database unreachable", exc_info=True)
+        checks["database"] = "unreachable"
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
         return {"status": "unhealthy", "checks": checks}
 
@@ -208,16 +298,22 @@ def health(db: DbDep, response: Response) -> dict:
         try:
             storage.client().bucket_exists(settings.s3_bucket)
             checks["object_storage"] = "ok"
-        except Exception as exc:
-            checks["object_storage"] = f"error: {_brief(exc)}"
+        except Exception:
+            logger.warning("health: object storage unreachable", exc_info=True)
+            checks["object_storage"] = "unreachable"
 
-    try:
-        vectors.client().get_collections()
-        checks["vector_store"] = "ok"
-    except Exception as exc:
-        checks["vector_store"] = f"error: {_brief(exc)}"
+    if not settings.qdrant_url:
+        checks["vector_store"] = "disabled"
+    else:
+        try:
+            vectors.client().get_collections()
+            checks["vector_store"] = "ok"
+        except Exception:
+            logger.warning("health: vector store unreachable", exc_info=True)
+            checks["vector_store"] = "unreachable"
 
-    degraded = [name for name, state in checks.items() if state != "ok"]
+    # Switched off on purpose is a configuration, not a fault.
+    degraded = [name for name, state in checks.items() if state not in ("ok", "disabled")]
     if degraded:
         response.status_code = status.HTTP_207_MULTI_STATUS
     body = {
@@ -234,16 +330,12 @@ def health(db: DbDep, response: Response) -> dict:
     return body
 
 
-def _brief(exc: Exception) -> str:
-    """First line only — driver errors otherwise leak connection strings."""
-    return str(exc).strip().splitlines()[0][:160]
-
-
 @app.post("/login")
 def login(
     request: Request,
     form: Annotated[OAuth2PasswordRequestForm, Depends()],
     db: DbDep,
+    background: BackgroundTasks,
 ) -> dict:
     # Throttle before touching the database, so an unthrottled password oracle
     # cannot be used to enumerate or brute-force accounts.
@@ -251,6 +343,7 @@ def login(
     # (FORWARDED_ALLOW_IPS); otherwise every caller shares the proxy's bucket.
     caller = request.client.host if request.client else "unknown"
     if not login_limiter.allow(caller):
+        logger.warning("login throttled for %s", caller)
         raise HTTPException(
             status.HTTP_429_TOO_MANY_REQUESTS,
             "Too many login attempts. Try again shortly.",
@@ -258,14 +351,20 @@ def login(
         )
 
     user = db.scalar(select(User).where(User.email == form.username))
-    # Same error and roughly the same work for unknown user and wrong password,
-    # so the response does not confirm which emails exist.
-    if user is None or not verify_password(form.password, user.password_hash):
+    # Same error and the same scrypt work for an unknown user and a wrong
+    # password: an unknown email is checked against a dummy hash, so neither the
+    # message nor the response time confirms which emails exist.
+    stored = user.password_hash if user else _TIMING_DUMMY_HASH
+    if not verify_password(form.password, stored) or user is None:
+        logger.warning("failed login for %r from %s", form.username, caller)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Incorrect email or password")
     # Same generic message: a deactivated account should not be distinguishable
     # from a wrong password by an outsider probing the endpoint.
     if not user.is_active:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Incorrect email or password")
+    # Refresh weather, markets, FX, news and risk behind the response, so the
+    # dashboard this user is about to open fills with current data.
+    background.add_task(_sweep_agents, "login")
     return {
         "access_token": make_token(user),
         "token_type": "bearer",
@@ -474,10 +573,13 @@ def weather(db: DbDep, user: UserDep, days: int = 5) -> dict:
             }
         )
 
-    latest = max((r.fetched_at for r in rows), default=None)
+    # Whichever provider served the newest rows: Open-Meteo, or MET Norway when
+    # Open-Meteo refused. Shown on the dashboard, which is also the attribution
+    # MET Norway's licence asks for.
+    newest = max(rows, key=lambda r: r.fetched_at, default=None)
     return {
-        "source": "open-meteo",
-        "fetched_at": latest.isoformat() if latest else None,
+        "source": newest.source if newest else "open-meteo",
+        "fetched_at": newest.fetched_at.isoformat() if newest else None,
         "facilities": [
             {"facility": name, "forecast": days_list}
             for name, days_list in sorted(by_facility.items())

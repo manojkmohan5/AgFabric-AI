@@ -514,6 +514,15 @@ def check_text_to_sql() -> None:
     # Real numbers came back, and they reached the answer.
     assert all(isinstance(row["total_amount"], (int, float)) for row in gen["rows"])
     assert r.json()["confidence"] > 0
+
+    # The same question from a role that may not see money gets no figures:
+    # generated SQL obeys the same redaction as every fixed endpoint.
+    denied = client.post(
+        "/query",
+        headers=bearer(login("warehouse@agfabric.test")),
+        json={"question": "what is the total invoice amount by status?"},
+    ).json()["explanation"]["generated_sql"]
+    assert denied["rows"] == [] and denied["rejected"], denied
     # Two LLM calls now: one for SQL, one for the answer.
     assert r.json()["model"]["llm_calls"] == 2
 
@@ -550,7 +559,7 @@ def check_sql_readonly_enforced() -> None:
         "INSERT INTO customers (name, kind) VALUES ('evil', 'farmer')",
         "DROP TABLE document_chunks",
     ):
-        result = sqlgen.run(write)
+        result = sqlgen.run(write, finance=True)
         assert result.error is not None, f"database ALLOWED a write: {write}"
         assert result.rows == []
 
@@ -565,7 +574,7 @@ def check_sql_readonly_enforced() -> None:
         assert not db.scalar(select(Customer).where(Customer.name == "evil"))
 
     # A legitimate read still works through the same path.
-    ok = sqlgen.run("SELECT COUNT(*) AS n FROM invoices")
+    ok = sqlgen.run("SELECT COUNT(*) AS n FROM invoices", finance=True)
     assert ok.error is None and ok.rows[0]["n"] > 0, ok
 
     # The users table is unreachable even though it exists in the database.
@@ -576,6 +585,32 @@ def check_sql_readonly_enforced() -> None:
         except sqlgen.UnsafeSQL:
             blocked += 1
     assert blocked == 2, "users table must be gated before it ever reaches Postgres"
+
+    # The database role is the boundary, not the regexes. These are shapes that
+    # once talked their way past validate(); run directly, Postgres refuses them.
+    for sql in (
+        "SELECT a.* FROM customers c, audit_logs a",
+        'SELECT u.password_hash FROM customers c, U&"us\\0065rs" u',
+        "SELECT email FROM users",
+    ):
+        for finance in (True, False):
+            denied = sqlgen.run(sql, finance=finance)
+            assert denied.error and not denied.rows, f"role read {sql!r}: {denied}"
+
+    # Non-finance callers: no invoices and no contract prices, whatever the SQL.
+    for sql in (
+        "SELECT SUM(amount) AS s FROM invoices",
+        "SELECT price_per_bu FROM contracts",
+    ):
+        denied = sqlgen.run(sql, finance=False)
+        assert denied.error and not denied.rows, f"ops role read {sql!r}"
+    allowed = sqlgen.run("SELECT number, status FROM contracts", finance=False)
+    assert allowed.error is None and allowed.rows, allowed
+
+    # The row cap is applied inside Postgres, so a model-chosen huge result never
+    # reaches the API's memory.
+    capped = sqlgen.run("SELECT g FROM generate_series(1, 100000) g", finance=True)
+    assert capped.row_count == 200 and capped.truncated, capped.row_count
 
 
 def check_agents() -> None:
@@ -835,10 +870,17 @@ def check_webhooks() -> None:
     assert replay.json()["duplicate"] is True, replay.json()
     assert replay.json()["status"] == "processed"
 
-    # A different event id but the same ticket is caught at the business level.
+    # A fresh event id does not make the same signed body new: the id header is
+    # unsigned, so dedupe keys on the body and a captured request cannot be
+    # replayed under new ids.
     resent = _post_webhook(payload, event_id="evt-2")
-    assert resent.json()["duplicate"] is False
-    assert resent.json()["status"] == "ignored", resent.json()
+    assert resent.json()["duplicate"] is True, resent.json()
+
+    # A different body for the same ticket is caught at the business level.
+    changed = {**payload, "source": "scale-house-2"}
+    rerouted = _post_webhook(changed, event_id="evt-2b")
+    assert rerouted.json()["duplicate"] is False
+    assert rerouted.json()["status"] == "ignored", rerouted.json()
 
     # The follow-up event flips verification.
     verify = _post_webhook(
@@ -909,10 +951,16 @@ def check_webhooks() -> None:
 
     with SL() as db:
         events = db.scalars(sqlselect(WebhookEvent)).all()
+    import hashlib
+    import json
+
+    def key(sent: dict) -> str:
+        return hashlib.sha256(json.dumps(sent).encode()).hexdigest()
+
     statuses = {e.dedupe_key: e.status for e in events}
-    assert statuses.get("evt-1") == "processed"
-    assert statuses.get("evt-2") == "ignored"
-    assert statuses.get("evt-7") == "failed"
+    assert statuses.get(key(payload)) == "processed"
+    assert statuses.get(key(changed)) == "ignored"
+    assert statuses.get(key(unknown)) == "failed"
     assert all(e.payload for e in events), "payloads must be retained for replay"
 
 

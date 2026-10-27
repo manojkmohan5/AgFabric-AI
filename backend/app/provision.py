@@ -113,9 +113,11 @@ class BinIn(BaseModel):
     facility_id: int = Field(ge=1)
     name: str = Field(min_length=1, max_length=64)
     commodity_id: int | None = Field(default=None, ge=1)
-    capacity_bu: Decimal = Field(gt=0)
-    current_bu: Decimal = Field(default=Decimal("0"), ge=0)
-    moisture_pct: Decimal | None = Field(default=None, ge=0, le=100)
+    # Upper bounds mirror the columns (Numeric(12, 2) and Numeric(4, 2)), so an
+    # out-of-range value is a 422 here rather than an overflow 500 at commit.
+    capacity_bu: Decimal = Field(gt=0, lt=Decimal("1e10"))
+    current_bu: Decimal = Field(default=Decimal("0"), ge=0, lt=Decimal("1e10"))
+    moisture_pct: Decimal | None = Field(default=None, ge=0, lt=100)
 
 
 @router.post("/bins", status_code=status.HTTP_201_CREATED)
@@ -197,8 +199,9 @@ class ContractIn(BaseModel):
     number: str = Field(min_length=1, max_length=32)
     customer_id: int = Field(ge=1)
     commodity_id: int = Field(ge=1)
-    quantity_bu: Decimal = Field(gt=0)
-    price_per_bu: Decimal = Field(gt=0)
+    # Bounded by the columns: Numeric(12, 2) and Numeric(10, 4).
+    quantity_bu: Decimal = Field(gt=0, lt=Decimal("1e10"))
+    price_per_bu: Decimal = Field(gt=0, lt=Decimal("1e6"))
     start_date: date
     end_date: date
 

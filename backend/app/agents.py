@@ -325,7 +325,9 @@ def execute(db: Session, name: str, trigger: str = "manual") -> AgentRun:
         detail = agent.run(db)
     except Exception as exc:
         db.rollback()
-        error = str(exc)[:500]
+        # First line only: SQLAlchemy appends the statement and its parameters
+        # below it, and /agents shows this to every role. Full trace is logged.
+        error = (str(exc).strip().splitlines() or [type(exc).__name__])[0][:300]
         logger.exception("agent %s failed", name)
 
     finished = datetime.now(UTC)

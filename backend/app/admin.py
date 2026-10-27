@@ -32,9 +32,13 @@ from .auth import current_user, hash_password, require_role
 from .config import settings
 from .db import get_db
 from .models import ROLES, User
+from .ratelimit import SlidingWindow
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+# Password changes per account: a few per window is plenty for a person.
+password_limiter = SlidingWindow(limit=5, window_seconds=300)
 
 DbDep = Annotated[Session, Depends(get_db)]
 AdminDep = Annotated[User, Depends(require_role("exec"))]
@@ -172,7 +176,17 @@ def change_own_password(
     """
     from .auth import verify_password
 
+    # Without a cap, a stolen token alone would be a password-guessing oracle
+    # for its account: each guess is one request.
+    key = str(user.id)
+    if not password_limiter.allow(key):
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "Too many attempts. Try again shortly.",
+            {"Retry-After": str(password_limiter.retry_after(key))},
+        )
     if not verify_password(body.current_password, user.password_hash):
+        logger.warning("wrong current password on password change for %s", user.email)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "current password is wrong")
     if body.new_password == body.current_password:
         raise HTTPException(

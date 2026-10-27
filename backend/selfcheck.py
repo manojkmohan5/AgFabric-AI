@@ -673,14 +673,11 @@ def _rejects(sql: str) -> str:
 def check_sql_gate_accepts_valid() -> None:
     v = sqlgen.validate
 
-    # A plain select gets a LIMIT imposed.
-    out = v("SELECT name FROM customers")
-    assert out == "SELECT name FROM customers LIMIT 200", out
-
-    # An existing LIMIT is respected, not doubled.
+    # Valid SQL passes through unchanged. The row cap is applied by Postgres in
+    # run(), not appended here, so a LIMIT inside a string literal or a huge
+    # LIMIT the model chose cannot slip past it.
+    assert v("SELECT name FROM customers") == "SELECT name FROM customers"
     assert v("SELECT name FROM customers LIMIT 5") == "SELECT name FROM customers LIMIT 5"
-
-    # A single-row aggregate needs no LIMIT.
     assert v("SELECT COUNT(*) FROM deliveries") == "SELECT COUNT(*) FROM deliveries"
     assert v("SELECT SUM(amount) FROM invoices") == "SELECT SUM(amount) FROM invoices"
 
@@ -689,7 +686,7 @@ def check_sql_gate_accepts_valid() -> None:
         "SELECT c.name, SUM(d.net_bu) FROM deliveries d "
         "JOIN customers c ON c.id = d.customer_id GROUP BY c.name"
     )
-    assert joined.endswith("LIMIT 200")
+    assert joined.startswith("SELECT c.name")
     cte = v(
         "WITH totals AS (SELECT customer_id, SUM(net_bu) s FROM deliveries "
         "GROUP BY customer_id) SELECT * FROM totals ORDER BY s DESC LIMIT 10"
@@ -702,6 +699,24 @@ def check_sql_gate_accepts_valid() -> None:
     )
     assert v("SELECT id FROM invoices LIMIT 1;") == "SELECT id FROM invoices LIMIT 1"
     assert v("  SELECT id FROM invoices LIMIT 1 ;; ") == "SELECT id FROM invoices LIMIT 1"
+
+
+def check_sql_gate_by_role() -> None:
+    """Non-finance callers get neither the invoices table nor contract prices."""
+    ops = sqlgen.OPS_TABLES
+    assert "invoices" not in ops and ops < sqlgen.ALLOWED_TABLES
+    try:
+        sqlgen.validate("SELECT SUM(amount) FROM invoices", ops)
+        raise AssertionError("ops allowlist accepted invoices")
+    except sqlgen.UnsafeSQL:
+        pass
+    assert sqlgen.validate("SELECT number, status FROM contracts", ops)
+
+    # The model is never shown what the role cannot read.
+    for hidden in ("invoices", "price_per_bu"):
+        assert hidden not in sqlgen.OPS_SQL_SYSTEM_PROMPT, hidden
+        assert hidden in sqlgen.SQL_SYSTEM_PROMPT, hidden
+    assert "quantity_bu, start_date" in sqlgen.OPS_SQL_SYSTEM_PROMPT
 
 
 def check_sql_gate_blocks_writes() -> None:
@@ -1230,6 +1245,44 @@ def check_weather_parsing() -> None:
     assert _at([], 0) is None
 
 
+def check_met_norway_daily() -> None:
+    """MET's hourly-then-six-hourly series collapses into Open-Meteo's daily shape."""
+    from app.weather import daily_from_hourly
+
+    def step(at: str, temp: float, wind: float, rh: float, rain: float, period: str):
+        return {
+            "time": at,
+            "data": {
+                "instant": {
+                    "details": {
+                        "air_temperature": temp,
+                        "wind_speed": wind,
+                        "relative_humidity": rh,
+                    }
+                },
+                period: {"details": {"precipitation_amount": rain}},
+            },
+        }
+
+    series = [
+        step("2026-10-27T22:00:00Z", 10.0, 5.0, 80.0, 0.5, "next_1_hours"),
+        step("2026-10-27T23:00:00Z", 8.0, 2.0, 90.0, 1.0, "next_1_hours"),
+        step("2026-10-28T00:00:00Z", 6.0, 10.0, 70.0, 0.0, "next_1_hours"),
+        # Later steps are six-hourly and carry only next_6_hours.
+        step("2026-10-28T06:00:00Z", 12.0, 1.0, 50.0, 3.0, "next_6_hours"),
+        # A step with nothing usable yields nulls, not a crash.
+        {"time": "2026-10-29T00:00:00Z", "data": {"instant": {"details": {}}}},
+    ]
+    daily = daily_from_hourly(series, days=3)
+    assert daily["time"] == ["2026-10-27", "2026-10-28", "2026-10-29"]
+    assert daily["temperature_2m_max"] == [10.0, 12.0, None]
+    assert daily["temperature_2m_min"] == [8.0, 6.0, None]
+    assert daily["precipitation_sum"] == [1.5, 3.0, None]
+    assert daily["wind_speed_10m_max"] == [18.0, 36.0, None]  # m/s to km/h
+    assert daily["relative_humidity_2m_mean"] == [85.0, 60.0, None]
+    assert daily_from_hourly(series, days=1)["time"] == ["2026-10-27"]
+
+
 def check_webhook_signature() -> None:
     import hashlib
     import hmac as _hmac
@@ -1336,6 +1389,7 @@ if __name__ == "__main__":
         check_customer_matching,
         check_fake_chat,
         check_sql_gate_accepts_valid,
+        check_sql_gate_by_role,
         check_sql_gate_blocks_writes,
         check_sql_gate_blocks_users_table,
         check_sql_gate_blocks_evasion,
@@ -1349,6 +1403,7 @@ if __name__ == "__main__":
         check_mark_to_market,
         check_position_alerts,
         check_weather_parsing,
+        check_met_norway_daily,
         check_webhook_signature,
         check_filename_safety,
         check_extraction,

@@ -70,7 +70,8 @@ class Settings(BaseSettings):
     chunk_size: int = 1200
     chunk_overlap: int = 150
 
-    # Vector search.
+    # Vector search. Blank switches it off: /health reports it as disabled and
+    # search answers 503 instead of retrying a store that is not there.
     qdrant_url: str = "http://localhost:6333"
     qdrant_collection: str = "agfabric_chunks"
 
@@ -86,6 +87,9 @@ class Settings(BaseSettings):
     # Reasoning models spend the output budget thinking unless told not to, e.g.
     # {"chat_template_kwargs": {"enable_thinking": false}} for Qwen on Lumen.
     openai_extra_body: dict[str, Any] = {}
+    # Per model call. The SDK default is ten minutes with two retries, so one
+    # stalled provider could hold a worker thread for half an hour.
+    llm_timeout_seconds: float = 60.0
     openai_embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
     max_query_chars: int = 1000

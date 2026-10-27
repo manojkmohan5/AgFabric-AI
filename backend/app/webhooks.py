@@ -71,24 +71,41 @@ def verify_signature(raw_body: bytes, provided: str | None) -> None:
     expected = hmac.new(
         settings.webhook_secret.encode(), raw_body, hashlib.sha256
     ).hexdigest()
-    # Accept an optional "sha256=" prefix, as most senders emit.
+    # Accept an optional "sha256=" prefix, as most senders emit. Compared as bytes:
+    # compare_digest raises on a str holding non-ASCII, which would be a 500.
     candidate = provided.split("=", 1)[-1].strip()
-    if not hmac.compare_digest(expected, candidate):
+    if not hmac.compare_digest(expected.encode(), candidate.encode()):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "signature mismatch")
 
 
+async def _capped_body(request: Request) -> bytes:
+    """The raw body, refused once it passes MAX_BODY_BYTES.
+
+    Streamed and counted, so an anonymous sender cannot make the API buffer a
+    huge body just to have it rejected afterwards.
+    """
+    too_large = HTTPException(
+        status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "webhook body too large"
+    )
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > MAX_BODY_BYTES:
+        raise too_large
+    body = bytearray()
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > MAX_BODY_BYTES:
+            raise too_large
+    return bytes(body)
+
+
 @router.post("/deliveries", status_code=status.HTTP_202_ACCEPTED)
-async def receive_delivery(
-    request: Request,
+def receive_delivery(
+    raw: Annotated[bytes, Depends(_capped_body)],
     db: DbDep,
     signature: Annotated[str | None, Header(alias="X-AgFabric-Signature")] = None,
-    event_id: Annotated[str | None, Header(alias="X-AgFabric-Event-Id")] = None,
 ) -> dict:
-    raw = await request.body()
-    if len(raw) > MAX_BODY_BYTES:
-        raise HTTPException(
-            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "webhook body too large"
-        )
+    # A plain def, so FastAPI runs it on a worker thread: the commits and the
+    # handler below block, and on the event loop they would stall every request.
     verify_signature(raw, signature)
 
     try:
@@ -107,9 +124,10 @@ async def receive_delivery(
             f"unsupported event {event_type!r}; supported: {', '.join(SUPPORTED_EVENTS)}",
         )
 
-    # Prefer the sender's id; fall back to a body hash so an unversioned sender
-    # still gets replay protection.
-    dedupe_key = event_id or hashlib.sha256(raw).hexdigest()
+    # Keyed on the signed bytes. The sender's X-AgFabric-Event-Id header sits
+    # outside the signature, so keying on it let anyone holding one valid request
+    # replay it indefinitely under fresh ids.
+    dedupe_key = hashlib.sha256(raw).hexdigest()
 
     event = WebhookEvent(
         source=str(payload.get("source", "unknown"))[:64],

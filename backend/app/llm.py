@@ -164,7 +164,12 @@ class OpenAIChat:
     def __init__(self, api_key: str, model: str, max_output_tokens: int) -> None:
         from openai import OpenAI
 
-        self._client = OpenAI(api_key=api_key, base_url=settings.openai_base_url or None)
+        self._client = OpenAI(
+            api_key=api_key,
+            base_url=settings.openai_base_url or None,
+            timeout=settings.llm_timeout_seconds,
+            max_retries=0,
+        )
         self.model = model
         self._max_output_tokens = max_output_tokens
 

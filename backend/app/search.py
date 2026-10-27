@@ -5,6 +5,7 @@ chunk ordinal. The response also reports provider, model and latency, which is
 the Explainable AI envelope the plan asks for.
 """
 
+import logging
 import time
 from typing import Annotated
 
@@ -21,6 +22,7 @@ from .embed import get_embedder
 from .models import Document, DocumentChunk, User
 
 router = APIRouter(tags=["search"])
+logger = logging.getLogger(__name__)
 
 DbDep = Annotated[Session, Depends(get_db)]
 UserDep = Annotated[User, Depends(current_user)]
@@ -49,6 +51,14 @@ def semantic_search(body: SearchRequest, db: DbDep, user: UserDep) -> dict:
         hits = vectors.search(vector, body.limit, body.document_id)
     except RuntimeError as exc:  # misconfiguration, not a client error
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
+    except Exception as exc:
+        # The store is down or unreachable: a readable 503, never a bare 500.
+        # The client error itself can name internal hosts, so it is only logged.
+        logger.warning("vector search failed", exc_info=True)
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "document search is unavailable right now",
+        ) from exc
     took_ms = round((time.perf_counter() - started) * 1000, 1)
 
     # Full chunk text comes from PostgreSQL rather than the Qdrant payload, which

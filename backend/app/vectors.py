@@ -5,6 +5,7 @@ instead of duplicating it. PostgreSQL stays the source of truth; Qdrant holds
 only what is needed to rank and to trace a hit back to its document.
 """
 
+import logging
 from collections.abc import Sequence
 from functools import lru_cache
 from typing import Any
@@ -18,8 +19,15 @@ from .config import settings
 PREVIEW_CHARS = 400
 
 
+logger = logging.getLogger(__name__)
+
+
 @lru_cache(maxsize=1)
 def client() -> QdrantClient:
+    if not settings.qdrant_url:
+        # A blank QDRANT_URL means this deployment runs without vector search.
+        # Said plainly here rather than as a refused connection to localhost.
+        raise RuntimeError("document search is not configured on this deployment")
     return QdrantClient(url=settings.qdrant_url, timeout=30)
 
 
@@ -106,8 +114,17 @@ def delete_collection() -> None:
         qdrant.delete_collection(settings.qdrant_collection)
 
 
-def count() -> int:
-    qdrant = client()
-    if not qdrant.collection_exists(settings.qdrant_collection):
-        return 0
-    return qdrant.count(settings.qdrant_collection, exact=True).count
+def count() -> int | None:
+    """Vectors stored, or None when the store is off or unreachable.
+
+    Only ever reported, never acted on, so a missing store must not turn the
+    monitoring and embedding agents' runs into failures.
+    """
+    try:
+        qdrant = client()
+        if not qdrant.collection_exists(settings.qdrant_collection):
+            return 0
+        return qdrant.count(settings.qdrant_collection, exact=True).count
+    except Exception:
+        logger.warning("vector count unavailable", exc_info=True)
+        return None
