@@ -376,6 +376,7 @@ def _item_count(detail: dict[str, Any] | None) -> int:
         "unlinked_deliveries",
         "prices_written",
         "rates_written",
+        "observations_written",
         "new_items",
         "documents",
     ):
