@@ -220,13 +220,18 @@ def health(db: DbDep, response: Response) -> dict:
     degraded = [name for name, state in checks.items() if state != "ok"]
     if degraded:
         response.status_code = status.HTTP_207_MULTI_STATUS
-    return {
+    body = {
         "status": "degraded" if degraded else "ok",
         "checks": checks,
         "degraded": degraded,
         # The login page reads this to decide whether to advertise demo accounts.
         "demo_mode": settings.demo_mode,
     }
+    if settings.demo_mode:
+        # Demo mode is a public prototype: the login page's preset buttons fill
+        # this in. Never sent when demo mode is off.
+        body["demo_password"] = settings.seed_password
+    return body
 
 
 def _brief(exc: Exception) -> str:

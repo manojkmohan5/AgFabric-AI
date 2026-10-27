@@ -30,9 +30,10 @@ class Settings(BaseSettings):
     # live database by accident.
     allow_destructive_seed: bool = False
 
-    # Shows the demo-account buttons on the login page. Must be off once real
+    # Shows the demo-account buttons on the login page and gives it SEED_PASSWORD
+    # (via /health) so one click fills in a working login. Must be off once real
     # people have real credentials — otherwise the login screen lists staff
-    # emails to anyone who loads it.
+    # emails and hands out the demo password to anyone who loads it.
     demo_mode: bool = False
 
     # First-run bootstrap. With an empty users table and these set, startup

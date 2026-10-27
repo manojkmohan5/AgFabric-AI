@@ -25,6 +25,9 @@ export default function LoginPage() {
   // Whether this instance is running the demo dataset. A production instance has
   // no seeded accounts, so listing them would send people to a dead end.
   const [demoMode, setDemoMode] = useState<boolean | null>(null);
+  // Sent by the API only in demo mode, so the preset buttons fill in a login
+  // that actually works.
+  const [demoPassword, setDemoPassword] = useState("");
 
   useEffect(() => {
     if (!ready) restore();
@@ -32,10 +35,14 @@ export default function LoginPage() {
 
   useEffect(() => {
     // /health is unauthenticated, which is why the flag lives there.
-    get<Health & { demo_mode?: boolean }>("/health", null)
+    get<Health & { demo_mode?: boolean; demo_password?: string }>(
+      "/health",
+      null,
+    )
       .then((h) => {
         const demo = h.demo_mode ?? false;
         setDemoMode(demo);
+        setDemoPassword(h.demo_password ?? "");
         // Prefill only where that account actually exists.
         if (demo) setEmail((current) => current || "exec@agfabric.test");
       })
@@ -171,9 +178,14 @@ export default function LoginPage() {
                   <li key={user.email}>
                     <button
                       type="button"
-                      onClick={() => setEmail(user.email)}
+                      onClick={() => {
+                        setEmail(user.email);
+                        setPassword(demoPassword);
+                        setError(null);
+                      }}
                       className="w-full rounded-md px-1.5 py-1 text-left text-xs hover:bg-[var(--surface)]"
                     >
+                      <span className="sr-only">Fill in </span>
                       <span className="font-medium">{user.email}</span>
                       <span className="block text-[var(--text-faint)]">
                         {user.role}
@@ -183,8 +195,7 @@ export default function LoginPage() {
                 ))}
               </ul>
               <p className="mt-3 text-xs text-[var(--text-faint)]">
-                Password is whatever <code>SEED_PASSWORD</code> is set to on the
-                API.
+                Pick an account to fill in its email and password, then sign in.
               </p>
             </div>
           )}
