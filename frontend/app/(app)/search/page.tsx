@@ -241,7 +241,11 @@ export default function SearchPage() {
               >
                 {result.explanation.retrieved_chunks.length === 0 ? (
                   <Empty>
-                    No documents matched. Upload some to enable this.
+                    {/* retrieval_error is a server-side detail, so only its
+                        presence is shown, never its text. */}
+                    {result.explanation.retrieval_error
+                      ? "Document search is unavailable right now, so this answer uses records only."
+                      : "No documents matched. Upload some to enable this."}
                   </Empty>
                 ) : (
                   <ul className="space-y-3">
@@ -285,10 +289,7 @@ export default function SearchPage() {
                         className="rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-xs"
                       >
                         <span className="font-medium">{triple.source}</span>
-                        <span
-                          className="mx-1.5 text-[var(--text-faint)]"
-                          aria-label={`relationship ${triple.relationship}`}
-                        >
+                        <span className="mx-1.5 text-[var(--text-faint)]">
                           {triple.relationship.toLowerCase().replace(/_/g, " ")}
                         </span>
                         <span className="font-medium">{triple.target}</span>

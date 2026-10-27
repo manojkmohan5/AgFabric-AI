@@ -43,6 +43,10 @@ export default function DocumentsPage() {
     onSuccess: (result) => {
       setNotice(result);
       queryClient.invalidateQueries({ queryKey: ["documents"] });
+    },
+    // Cleared on failure too: picking the same file again fires no change
+    // event, so after a failed upload a retry would silently do nothing.
+    onSettled: () => {
       if (inputRef.current) inputRef.current.value = "";
     },
   });

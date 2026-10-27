@@ -91,7 +91,9 @@ export default function RiskPage() {
           {STATUSES.map((option) => (
             <label
               key={option}
-              className="cursor-pointer rounded-full border px-3 py-1.5 text-xs font-medium capitalize"
+              // The radio is sr-only, which clips its own focus outline, so the
+              // label draws the ring while the radio inside it has focus.
+              className="cursor-pointer rounded-full border px-3 py-1.5 text-xs font-medium capitalize has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-[var(--focus)]"
               style={
                 status === option
                   ? {
@@ -123,6 +125,7 @@ export default function RiskPage() {
         {alerts.isLoading && <Loading label="Loading alerts" />}
         {alerts.error && <ErrorNote message={(alerts.error as Error).message} />}
         {act.error && <ErrorNote message={(act.error as Error).message} />}
+        {rescan.error && <ErrorNote message={(rescan.error as Error).message} />}
 
         {alerts.data && alerts.data.alerts.length === 0 && (
           <Empty>

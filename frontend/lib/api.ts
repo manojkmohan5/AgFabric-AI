@@ -39,6 +39,22 @@ function discardDeadSession(): void {
   }
 }
 
+/** fetch against the API, with a network failure turned into an ApiError.
+ *
+ * A rejected fetch (offline, DNS, CORS, or the free-plan API still waking from
+ * idle) only says "Failed to fetch", which tells nobody what to do next.
+ */
+async function request(path: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetch(`${BASE}${path}`, init);
+  } catch {
+    throw new ApiError(
+      0,
+      "Can't reach the server. It may be waking up; try again in a minute.",
+    );
+  }
+}
+
 async function unwrap<T>(
   response: Response,
   authenticated = false,
@@ -46,7 +62,8 @@ async function unwrap<T>(
   if (response.ok) return (await response.json()) as T;
   if (response.status === 401 && authenticated) discardDeadSession();
 
-  let detail = `${response.status} ${response.statusText}`;
+  // Trimmed: HTTP/2 has no reason phrase, so statusText is empty there.
+  let detail = `${response.status} ${response.statusText}`.trim();
   try {
     const body = await response.json();
     if (typeof body.detail === "string") detail = body.detail;
@@ -64,7 +81,7 @@ async function unwrap<T>(
 
 export async function get<T>(path: string, token: string | null): Promise<T> {
   return unwrap<T>(
-    await fetch(`${BASE}${path}`, {
+    await request(path, {
       headers: authHeader(token),
       cache: "no-store",
     }),
@@ -78,7 +95,7 @@ export async function post<T>(
   body?: unknown,
 ): Promise<T> {
   return unwrap<T>(
-    await fetch(`${BASE}${path}`, {
+    await request(path, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeader(token) },
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -94,7 +111,7 @@ export async function login(email: string, password: string) {
     access_token: string;
     user: { email: string; name: string; role: string };
   }>(
-    await fetch(`${BASE}/login`, {
+    await request("/login", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: form,
@@ -106,7 +123,7 @@ export async function uploadDocument(file: File, token: string | null) {
   const form = new FormData();
   form.append("file", file);
   return unwrap<UploadResult>(
-    await fetch(`${BASE}/documents/upload`, {
+    await request("/documents/upload", {
       method: "POST",
       // No Content-Type: the browser must set the multipart boundary itself.
       headers: authHeader(token),

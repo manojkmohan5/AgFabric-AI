@@ -42,7 +42,12 @@ export const useAuth = create<AuthState>((set) => ({
   restore: () => {
     try {
       const raw = localStorage.getItem(KEY);
-      set({ session: raw ? (JSON.parse(raw) as Session) : null, ready: true });
+      const stored = raw ? JSON.parse(raw) : null;
+      // localStorage is editable by hand and outlives older builds. A value with
+      // no usable token would pass as signed in and fail on every page, so it
+      // counts as signed out.
+      const valid = typeof stored?.token === "string" && stored.token !== "";
+      set({ session: valid ? (stored as Session) : null, ready: true });
     } catch {
       set({ session: null, ready: true });
     }

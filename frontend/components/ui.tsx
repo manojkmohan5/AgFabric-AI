@@ -261,12 +261,12 @@ export function Confidence({ value }: { value: number }) {
 
 /* ----------------------------------------------------------------- feedback */
 
-/** Loading state. `role="status"` + aria-busy so it is announced, not silent. */
+/** Loading state. `role="status"` so it is announced, not silent. No aria-busy:
+ *  on a live region it makes some screen readers hold the announcement back. */
 export function Loading({ label = "Loading" }: { label?: string }) {
   return (
     <div
       role="status"
-      aria-busy="true"
       className="flex items-center gap-2 py-6 text-sm text-[var(--text-muted)]"
     >
       <span

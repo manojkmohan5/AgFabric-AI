@@ -22,6 +22,9 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Set once a sign-in has run for a few seconds: the free-plan API sleeps when
+  // idle and takes up to a minute to wake, which otherwise looks like a hang.
+  const [slow, setSlow] = useState(false);
   // Whether this instance is running the demo dataset. A production instance has
   // no seeded accounts, so listing them would send people to a dead end.
   const [demoMode, setDemoMode] = useState<boolean | null>(null);
@@ -32,6 +35,11 @@ export default function LoginPage() {
   useEffect(() => {
     if (!ready) restore();
   }, [ready, restore]);
+
+  useEffect(() => {
+    // The root layout's title is shared by every route (WCAG 2.4.2).
+    document.title = "Sign in · AgFabric AI";
+  }, []);
 
   useEffect(() => {
     // /health is unauthenticated, which is why the flag lives there.
@@ -65,6 +73,7 @@ export default function LoginPage() {
     event.preventDefault();
     setError(null);
     setBusy(true);
+    const slowTimer = setTimeout(() => setSlow(true), 5_000);
     try {
       const result = await login(email, password);
       signIn({
@@ -77,6 +86,8 @@ export default function LoginPage() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Sign in failed");
     } finally {
+      clearTimeout(slowTimer);
+      setSlow(false);
       setBusy(false);
     }
   }
@@ -105,7 +116,11 @@ export default function LoginPage() {
         <div className="glow-sweep-thin absolute left-0 top-0 h-[80rem] w-[15rem] -translate-y-[22rem] -rotate-45 rounded-full" />
       </div>
 
-      <div className="relative mx-auto flex min-h-dvh max-w-6xl flex-col justify-center px-4 py-10">
+      {/* The root layout's skip link targets #main, so the content must be it. */}
+      <main
+        id="main"
+        className="relative mx-auto flex min-h-dvh max-w-6xl flex-col justify-center px-4 py-10"
+      >
         <div className="mx-auto w-full max-w-sm">
           <div className="mb-6 flex items-center gap-2.5">
             <span
@@ -166,6 +181,13 @@ export default function LoginPage() {
             <Button type="submit" disabled={busy} className="w-full">
               {busy ? "Signing in…" : "Sign in"}
             </Button>
+
+            {busy && slow && (
+              <p role="status" className="text-xs text-[var(--text-muted)]">
+                The server is waking up after being idle. This can take up to a
+                minute.
+              </p>
+            )}
           </form>
 
           {demoMode && (
@@ -200,7 +222,7 @@ export default function LoginPage() {
             </div>
           )}
         </div>
-      </div>
+      </main>
     </div>
   );
 }

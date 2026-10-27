@@ -94,11 +94,15 @@ export default function DashboardPage() {
     refetchInterval: 60_000,
   });
 
+  // Signing in starts a background refresh of every feed, which lands within
+  // about half a minute. A card with nothing yet polls every 15s until it fills,
+  // then drops back to the slow cadence its source actually changes at.
   const weather = useQuery({
     queryKey: ["weather"],
     queryFn: () => get<Weather>("/weather", token),
     enabled: Boolean(token),
-    refetchInterval: 300_000,
+    refetchInterval: (q) =>
+      q.state.data?.facilities.length ? 300_000 : 15_000,
   });
 
   const marketQ = useQuery({
@@ -106,7 +110,7 @@ export default function DashboardPage() {
     queryFn: () => get<Market>("/market", token),
     enabled: Boolean(token),
     // The board only settles daily; the agent syncs hourly.
-    refetchInterval: 300_000,
+    refetchInterval: (q) => (q.state.data?.history.length ? 300_000 : 15_000),
   });
 
   const feedsQ = useQuery({
@@ -114,7 +118,7 @@ export default function DashboardPage() {
     queryFn: () => get<Feeds>("/feeds", token),
     enabled: Boolean(token),
     // FX settles daily and the news feed is polled hourly by the agent.
-    refetchInterval: 300_000,
+    refetchInterval: (q) => (q.state.data?.news.length ? 300_000 : 15_000),
   });
 
   const health = useQuery({
@@ -324,6 +328,9 @@ export default function DashboardPage() {
         <Reveal delay={0.1} className="h-full">
           <Card title="Weather — Open-Meteo" className="h-full">
             {weather.isLoading && <Loading label="Loading forecast" />}
+            {weather.error && (
+              <ErrorNote message={(weather.error as Error).message} />
+            )}
             {weather.data && weather.data.facilities.length === 0 && (
               <p className="text-sm text-[var(--text-muted)]">
                 No forecast synced yet. Run the{" "}
@@ -420,6 +427,9 @@ export default function DashboardPage() {
         <Reveal delay={0.14} className="h-full">
           <Card title="Bin inventory" className="h-full">
             {storage.isLoading && <Loading label="Loading bins" />}
+            {storage.error && (
+              <ErrorNote message={(storage.error as Error).message} />
+            )}
             {binBars.length > 0 ? (
               // Every bin across every facility, so this list grows with the
               // business. Scrolls in place rather than stretching the row to
@@ -438,7 +448,9 @@ export default function DashboardPage() {
                 />
               </div>
             ) : (
-              !storage.isLoading && <Empty>No bins configured.</Empty>
+              // Only a successful answer can say there are no bins; a failed
+              // request is reported above instead.
+              storage.isSuccess && <Empty>No bins configured.</Empty>
             )}
           </Card>
         </Reveal>
@@ -468,6 +480,9 @@ export default function DashboardPage() {
               </Card>
             )}
             <Card title="System">
+              {health.error && (
+                <ErrorNote message={(health.error as Error).message} />
+              )}
               {health.data && (
                 <dl className="grid gap-2 sm:grid-cols-3">
                   {Object.entries(health.data.checks).map(([name, state]) => (
@@ -479,8 +494,22 @@ export default function DashboardPage() {
                         {name.replace(/_/g, " ")}
                       </dt>
                       <dd>
-                        <Badge tone={state === "ok" ? "accent" : "danger"}>
-                          {state === "ok" ? "OK" : "Failing"}
+                        {/* "disabled" is a dependency switched off on purpose
+                            for this deployment, not one that is down. */}
+                        <Badge
+                          tone={
+                            state === "ok"
+                              ? "accent"
+                              : state === "disabled"
+                                ? "neutral"
+                                : "danger"
+                          }
+                        >
+                          {state === "ok"
+                            ? "OK"
+                            : state === "disabled"
+                              ? "Off"
+                              : "Failing"}
                         </Badge>
                       </dd>
                     </div>
@@ -509,6 +538,9 @@ export default function DashboardPage() {
           }
         >
           {marketQ.isLoading && <Loading label="Loading board" />}
+          {marketQ.error && (
+            <ErrorNote message={(marketQ.error as Error).message} />
+          )}
           {marketQ.data && marketQ.data.board.length === 0 && (
             <Empty>
               No prices synced yet. Run the{" "}
@@ -615,6 +647,9 @@ export default function DashboardPage() {
           }
         >
           {feedsQ.isLoading && <Loading label="Loading headlines" />}
+          {feedsQ.error && (
+            <ErrorNote message={(feedsQ.error as Error).message} />
+          )}
           {feedsQ.data && feedsQ.data.news.length === 0 && (
             <Empty>
               No headlines synced yet. Run the{" "}

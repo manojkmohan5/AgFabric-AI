@@ -81,7 +81,9 @@ export function FxRibbon({ rates, base }: { rates: FxRate[]; base: string }) {
               key={r.currency}
               // One line per pair. The country and the reason it matters moved
               // to the title attribute: BRL already implies Brazil, so printing
-              // both made every tile four lines tall for one number.
+              // both made every tile four lines tall for one number. A title is
+              // out of reach by keyboard and touch, so the <dt> also carries
+              // the note as visually hidden text.
               title={r.note}
               className="widget-tile flex items-baseline justify-between gap-2 px-2.5 py-1.5"
               initial={reduce ? false : { opacity: 0, y: 4 }}
@@ -90,6 +92,7 @@ export function FxRibbon({ rates, base }: { rates: FxRate[]; base: string }) {
             >
               <dt className="text-[0.7rem] font-medium text-[var(--text-muted)]">
                 {r.currency}
+                <span className="sr-only">, {r.note}</span>
               </dt>
               <dd className="flex items-baseline gap-1.5">
                 <span className="tabular text-sm font-semibold leading-none">

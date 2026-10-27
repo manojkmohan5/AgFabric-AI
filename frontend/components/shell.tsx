@@ -1,5 +1,6 @@
 "use client";
 
+import { useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { type ReactNode, useEffect } from "react";
@@ -29,6 +30,7 @@ export function Shell({ children }: { children: ReactNode }) {
   const { session, ready, restore, signOut } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
+  const queryClient = useQueryClient();
 
   useEffect(() => {
     if (!ready) restore();
@@ -39,6 +41,14 @@ export function Shell({ children }: { children: ReactNode }) {
     // logged-in user is bounced to /login on first paint.
     if (ready && !session) router.replace("/login");
   }, [ready, session, router]);
+
+  function handleSignOut() {
+    // Query keys carry no user identity, so without this the next person to sign
+    // in on this tab is served the previous user's cached data.
+    queryClient.clear();
+    signOut();
+    router.replace("/login");
+  }
 
   if (!ready || !session) {
     return (
@@ -73,6 +83,15 @@ export function Shell({ children }: { children: ReactNode }) {
             <p className="hidden text-xs capitalize text-[var(--text-faint)] lg:block">
               {session.role}
             </p>
+            {/* The sidebar's Sign out is desktop-only, so below lg (and at 200%
+                zoom) this is the only way out. */}
+            <button
+              type="button"
+              onClick={handleSignOut}
+              className="rounded-lg px-2.5 py-1.5 text-sm text-[var(--text-muted)] hover:bg-[var(--surface-2)] hover:text-[var(--text)] lg:hidden"
+            >
+              Sign out
+            </button>
           </div>
         </div>
 
@@ -117,10 +136,7 @@ export function Shell({ children }: { children: ReactNode }) {
         <div className="hidden border-t border-[var(--border)] p-2 lg:absolute lg:bottom-0 lg:block lg:w-60">
           <button
             type="button"
-            onClick={() => {
-              signOut();
-              router.replace("/login");
-            }}
+            onClick={handleSignOut}
             className="w-full rounded-lg px-2.5 py-2 text-left text-sm text-[var(--text-muted)] hover:bg-[var(--surface-2)] hover:text-[var(--text)]"
           >
             Sign out
@@ -144,6 +160,12 @@ export function PageHeader({
   description?: string;
   action?: ReactNode;
 }) {
+  // The root layout sets one title for every route; name each page instead, so
+  // tabs, history and screen readers can tell them apart (WCAG 2.4.2).
+  useEffect(() => {
+    document.title = `${title} · AgFabric AI`;
+  }, [title]);
+
   return (
     <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
       <div>
