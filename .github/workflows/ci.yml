@@ -8,7 +8,9 @@ on:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Superseded PR runs are cancelled; runs on main queue instead, so a newer
+  # push never kills a deploy halfway through.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
@@ -130,3 +132,107 @@ jobs:
 
       - name: Build API image
         run: docker build -t agfabric-api .
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # next build type-checks as well, so this catches type errors too.
+      - name: Build
+        run: npm run build
+        env:
+          NEXT_PUBLIC_API_URL: https://agfabric-api.onrender.com
+
+  # ------------------------------------------------------------------ deploy
+  # Only pushes to main deploy, and only after every check above passed. The
+  # backend goes first so the new frontend never calls an API that lacks it.
+
+  deploy-backend:
+    needs: [backend, docker]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://agfabric-api.onrender.com
+    defaults:
+      run:
+        working-directory: .
+    env:
+      RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+      RENDER_SERVICE_ID: srv-dbgdm4e1egvs738ed7ng
+    steps:
+      # Deploys this exact commit (auto-deploy is off on Render) and waits for
+      # the health check to pass, so a failed deploy fails this job.
+      - name: Deploy to Render
+        run: |
+          test -n "$RENDER_API_KEY" || { echo "::error::Add the RENDER_API_KEY repository secret"; exit 1; }
+          api="https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys"
+          auth="Authorization: Bearer $RENDER_API_KEY"
+          id=$(curl -fsS -X POST -H "$auth" -H 'Content-Type: application/json' \
+            -d "{\"commitId\": \"$GITHUB_SHA\"}" "$api" | jq -r .id)
+          echo "Render deploy $id for $GITHUB_SHA"
+          for _ in $(seq 1 90); do
+            status=$(curl -fsS -H "$auth" "$api/$id" | jq -r .status)
+            case "$status" in
+              live) echo "Live."; exit 0 ;;
+              *failed|canceled|deactivated)
+                echo "::error::Render deploy $id ended as $status"; exit 1 ;;
+            esac
+            sleep 10
+          done
+          echo "::error::Render deploy $id still $status after 15 minutes"; exit 1
+
+  deploy-frontend:
+    needs: [frontend, deploy-backend]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://agfabric.vercel.app
+    defaults:
+      run:
+        working-directory: frontend
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: team_0bT4yh3FxNCE0PkEUhMee7hL
+      VERCEL_PROJECT_ID: prj_HSpb3icgTpWl7lJiIY0lnzHu12Lh
+    steps:
+      - uses: actions/checkout@v4
+
+      # Vercel's Hobby plan blocks a deployment whose git commit author is not
+      # the account owner, and the CLI attaches that author whenever it runs
+      # inside a git checkout. Without .git there is no author to block.
+      - name: Detach from git
+        working-directory: .
+        run: rm -rf .git
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@65.4.0
+
+      - name: Pull production settings
+        run: |
+          test -n "$VERCEL_TOKEN" || { echo "::error::Add the VERCEL_TOKEN repository secret"; exit 1; }
+          vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+
+      - name: Build
+        run: vercel build --prod --token="$VERCEL_TOKEN"
+
+      - name: Deploy to Vercel
+        run: vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN"

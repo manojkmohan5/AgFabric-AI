@@ -242,8 +242,8 @@ def login(
 ) -> dict:
     # Throttle before touching the database, so an unthrottled password oracle
     # cannot be used to enumerate or brute-force accounts.
-    # ponytail: request.client.host is the socket peer. Read a trusted
-    # X-Forwarded-For only once a proxy actually sits in front of this.
+    # Behind a proxy this is the real caller only when uvicorn trusts that proxy
+    # (FORWARDED_ALLOW_IPS); otherwise every caller shares the proxy's bucket.
     caller = request.client.host if request.client else "unknown"
     if not login_limiter.allow(caller):
         raise HTTPException(

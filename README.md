@@ -427,6 +427,45 @@ Prometheus supplies via `bearer_token` in its scrape config.
 
 ---
 
+## Deployment
+
+| Piece | Where | Notes |
+| --- | --- | --- |
+| API | Render web service `agfabric-api`, Docker from `backend/` | https://agfabric-api.onrender.com, health check `/health` |
+| Database | Render Postgres `agfabric-db` | External access closed (empty IP allow-list) |
+| Frontend | Vercel project `agfabric` | https://agfabric.vercel.app |
+| AI | NCSA Lumen, `qwen3.8-27b` | Chat and OCR; search uses the local embedder |
+
+Secrets (`JWT_SECRET`, `SEED_PASSWORD` for the demo accounts, `METRICS_TOKEN`,
+`WEBHOOK_SECRET`, the Lumen key) live only in the Render service's environment.
+`FORWARDED_ALLOW_IPS` there trusts Render's internal network and Cloudflare's
+published ranges, so the login limiter sees each caller's real address; refresh
+it if Cloudflare's list changes.
+
+Document storage and vector search are off for now (`S3_BUCKET` blank, no
+Qdrant), so uploads answer 503 and `/health` reports `degraded`. Set the `S3_*`
+variables to an S3-compatible bucket and `QDRANT_URL` to a Qdrant cluster to turn
+them on.
+
+Both services are on free plans: the API sleeps after 15 minutes idle, so the
+first request after that takes about a minute, and Render deletes the free
+database 30 days after creation unless it is upgraded.
+
+### CI/CD
+
+Every push to `main` runs the checks in `.github/workflows/ci.yml`. When they
+pass, `deploy-backend` deploys that exact commit to Render and waits for it to go
+live, then `deploy-frontend` builds and deploys to Vercel. Pull requests run the
+checks only. Render auto-deploy is off and the Vercel project has no Git
+connection, so the pipeline is the only route to production.
+
+| Repository secret | Where it comes from |
+| --- | --- |
+| `RENDER_API_KEY` | Render → Account Settings → API Keys |
+| `VERCEL_TOKEN` | `vercel tokens create github-actions-agfabric --project agfabric` |
+
+---
+
 ## Layout
 
 ```
