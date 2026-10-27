@@ -72,15 +72,17 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements*.txt
 
-      # Not a service container: minio/minio needs a `server /data` command, and
+      # Not a service container: MinIO needs a `server /data` command, and
       # GitHub Actions services cannot pass one. Same invocation used locally.
+      # minio/minio is gone from Docker Hub; pgsty/minio is the maintained
+      # community build of the same server, pinned to a release.
       - name: Start MinIO
         working-directory: .
         run: |
           docker run -d --name minio -p 9000:9000 \
             -e MINIO_ROOT_USER=agfabric \
             -e MINIO_ROOT_PASSWORD=agfabric-dev \
-            minio/minio:latest server /data
+            pgsty/minio:RELEASE.2026-08-04T00-00-00Z server /data
           for _ in $(seq 1 30); do
             curl -sf http://localhost:9000/minio/health/live && exit 0
             sleep 1

@@ -44,7 +44,7 @@ services:
     volumes: ["qdrant:/qdrant/storage"]
 
   minio:
-    image: minio/minio:latest
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
